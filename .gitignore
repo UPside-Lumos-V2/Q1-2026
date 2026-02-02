@@ -1,0 +1,15 @@
+# Data Directories
+data/local/
+data/verified/
+
+# Foundry
+out/
+cache/
+broadcast/
+dist/
+
+# VS Code
+.vscode/
+.claude/
+# System
+.DS_Store

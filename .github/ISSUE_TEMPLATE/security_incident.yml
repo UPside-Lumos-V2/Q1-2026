@@ -1,0 +1,53 @@
+name: Security Incident
+description: Report a DeFi security incident for analysis
+title: "[Incident] "
+labels: ["security-incident"]
+body:
+  - type: input
+    id: protocol
+    attributes:
+      label: Protocol
+      description: Target protocol name (e.g. Uniswap)
+      placeholder: Uniswap
+    validations:
+      required: true
+
+  - type: dropdown
+    id: chain
+    attributes:
+      label: Chain
+      options:
+        - Ethereum Mainnet (1)
+        - Base Mainnet (8453)
+        - Arbitrum One (42161)
+        - Optimism (10)
+        - Polygon (137)
+        - BSC Mainnet (56)
+        - Avalanche C-Chain (43114)
+        - Fantom (250)
+        - Linea (59144)
+        - Blast (81457)
+        - Celo (42220)
+        - ZKsync Era (324)
+        - Mantle (5000)
+        - opBNB (204)
+        - Scroll (534352)
+        - Sei (1329)
+        - Palm (11297108109)
+    validations:
+      required: true
+
+  - type: input
+    id: txhash
+    attributes:
+      label: Tx Hash
+      description: The exploit transaction hash
+      placeholder: "0x..."
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        **Note:** Assign auditors using the "Assignees" field on the right sidebar.

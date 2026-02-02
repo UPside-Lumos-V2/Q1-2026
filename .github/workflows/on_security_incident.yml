@@ -1,0 +1,574 @@
+name: Security Incident Handler
+
+on:
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  setup:
+    if: contains(github.event.issue.labels.*.name, 'security-incident')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: incident-setup
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure Labels
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const labels = [
+              { name: 'security-incident', color: 'b60205', description: 'Security incident report' },
+              { name: 'in-progress', color: 'fbca04', description: 'Analysis in progress' },
+              { name: 'verified', color: '0e8a16', description: 'Exploit verified' },
+              { name: 'needs-manual-poc', color: 'e4e669', description: 'Manual PoC required - replay failed' },
+              { name: 'flashloan', color: '5319e7', description: 'Flashloan detected' },
+              { name: 'complex', color: '0052cc', description: 'High gas usage / complex logic' }
+            ];
+            for (const label of labels) {
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label.name
+                });
+              } catch (e) {
+                if (e.status === 404) {
+                  await github.rest.issues.createLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    ...label
+                  });
+                }
+              }
+            }
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Parse Issue
+        id: parse
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const body = context.payload.issue.body || "";
+            const assignees = context.payload.issue.assignees || [];
+
+            const extract = (regex) => {
+              const match = body.match(regex);
+              return match ? match[1].trim() : null;
+            };
+
+            const protocol = extract(/### Protocol\s*\n+(.*)/);
+            const txhash = extract(/### Tx Hash\s*\n+(.*)/);
+            const chainRaw = extract(/### Chain\s*\n+(.*)/);
+            const chainId = chainRaw ? chainRaw.match(/\((\d+)\)/)[1] : "1";
+
+            if (!protocol || !txhash) {
+              core.setFailed("Missing required fields: Protocol or Tx Hash.");
+              return;
+            }
+
+            const auditors = assignees.map(a => a.login).filter(s => s);
+            
+            // Assign issue creator if no assignees
+            if (auditors.length === 0) {
+              const creator = context.payload.issue.user.login;
+              auditors.push(creator);
+              await github.rest.issues.addAssignees({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                assignees: [creator]
+              });
+            }
+
+            const newTitle = `[Incident] ${protocol}`;
+            if (context.payload.issue.title !== newTitle) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                title: newTitle
+              });
+            }
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['in-progress']
+            });
+
+            core.setOutput("protocol", protocol);
+            core.setOutput("txhash", txhash);
+            core.setOutput("chain_id", chainId);
+            core.setOutput("auditors", JSON.stringify(auditors));
+
+      - name: Fetch Metadata & Trace
+        id: metadata
+        env:
+          INFURA_KEY: ${{ secrets.INFURA_API_KEY }}
+        run: |
+          CHAIN_ID="${{ steps.parse.outputs.chain_id }}"
+          TXHASH="${{ steps.parse.outputs.txhash }}"
+
+          case $CHAIN_ID in
+            1)           PREFIX="mainnet"; DEFAULT_RPC="https://eth.llamarpc.com" ;;
+            8453)        PREFIX="base-mainnet"; DEFAULT_RPC="https://mainnet.base.org" ;;
+            42161)       PREFIX="arbitrum-mainnet"; DEFAULT_RPC="https://arb1.arbitrum.io/rpc" ;;
+            10)          PREFIX="optimism-mainnet"; DEFAULT_RPC="https://mainnet.optimism.io" ;;
+            137)         PREFIX="polygon-mainnet"; DEFAULT_RPC="https://polygon-rpc.com" ;;
+            56)          PREFIX="bsc-mainnet"; DEFAULT_RPC="https://bsc-dataseed.binance.org" ;;
+            43114)       PREFIX="avalanche-mainnet"; DEFAULT_RPC="https://api.avax.network/ext/bc/C/rpc" ;;
+            250)         PREFIX=""; DEFAULT_RPC="https://rpc.ftm.tools" ;;
+            59144)       PREFIX="linea-mainnet"; DEFAULT_RPC="https://rpc.linea.build" ;;
+            81457)       PREFIX="blast-mainnet"; DEFAULT_RPC="https://rpc.blast.io" ;;
+            42220)       PREFIX="celo-mainnet"; DEFAULT_RPC="https://forno.celo.org" ;;
+            324)         PREFIX="zksync-mainnet"; DEFAULT_RPC="https://mainnet.era.zksync.io" ;;
+            5000)        PREFIX="mantle-mainnet"; DEFAULT_RPC="https://rpc.mantle.xyz" ;;
+            204)         PREFIX="opbnb-mainnet"; DEFAULT_RPC="https://opbnb-mainnet-rpc.binance.org" ;;
+            534352)      PREFIX="scroll-mainnet"; DEFAULT_RPC="https://rpc.scroll.io" ;;
+            1329)        PREFIX="sei-mainnet"; DEFAULT_RPC="https://evm.sei.io" ;;
+            11297108109) PREFIX="palm-mainnet"; DEFAULT_RPC="https://palm-mainnet.public.blastapi.io" ;;
+            *) echo "::error::Unsupported chain: $CHAIN_ID"; exit 1 ;;
+          esac
+
+          if [ -n "$INFURA_KEY" ] && [ -n "$PREFIX" ]; then
+            RPC_URL="https://${PREFIX}.infura.io/v3/$INFURA_KEY"
+          else
+            RPC_URL="$DEFAULT_RPC"
+          fi
+
+          # 1. Fetch Tx Data (Basic)
+          if ! echo "$TXHASH" | grep -qE '^0x[a-fA-F0-9]{64}$'; then
+            echo "FETCH_ERROR=Invalid transaction hash format." >> $GITHUB_ENV
+            echo "::error::Invalid tx hash format"
+            exit 1
+          fi
+
+          TX_RES=$(curl -s -X POST -H "Content-Type: application/json" \
+            --data "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getTransactionByHash\",\"params\":[\"$TXHASH\"],\"id\":1}" \
+            $RPC_URL)
+          
+          BLOCK_HEX=$(echo $TX_RES | jq -r '.result.blockNumber // empty' | tr -d '\r\n ')
+          if [ -z "$BLOCK_HEX" ] || [ "$BLOCK_HEX" == "null" ]; then
+            echo "FETCH_ERROR=Transaction not found." >> $GITHUB_ENV
+            echo "::error::Failed to fetch block - tx not found"
+            exit 1
+          fi
+
+          BLOCK_RES=$(curl -s -X POST -H "Content-Type: application/json" \
+            --data "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$BLOCK_HEX\", false],\"id\":1}" \
+            $RPC_URL)
+          TIMESTAMP_HEX=$(echo $BLOCK_RES | jq -r '.result.timestamp // empty' | tr -d '\r\n ')
+
+          BLOCK_NUM=$(printf "%d" $BLOCK_HEX)
+          TIMESTAMP=$(printf "%d" $TIMESTAMP_HEX)
+          DATE_STR=$(date -u -d @$TIMESTAMP +%Y-%m-%d)
+          FORK_BLOCK=$((BLOCK_NUM - 1))
+
+          ATTACKER_RAW=$(echo $TX_RES | jq -r '.result.from // "0x0000000000000000000000000000000000000000"')
+          TARGET_RAW=$(echo $TX_RES | jq -r '.result.to // "0x0000000000000000000000000000000000000000"')
+          INPUT_DATA=$(echo $TX_RES | jq -r '.result.input // "0x"')
+
+          ATTACKER=$(cast to-checksum "$ATTACKER_RAW")
+          TARGET=$(cast to-checksum "$TARGET_RAW")
+
+          echo "block_number=$BLOCK_NUM" >> $GITHUB_OUTPUT
+          echo "fork_block=$FORK_BLOCK" >> $GITHUB_OUTPUT
+          echo "date=$DATE_STR" >> $GITHUB_OUTPUT
+          echo "attacker=$ATTACKER" >> $GITHUB_OUTPUT
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          echo "input_data=$INPUT_DATA" >> $GITHUB_OUTPUT
+
+          # 2. Analyze Trace (Advanced)
+          echo "Running Trace Analysis..."
+          # cast run is heavy, handle errors gracefully
+          TRACE_OUTPUT=$(cast run $TXHASH --rpc-url $RPC_URL --json 2>/dev/null || echo "{}")
+          
+          GAS_USED=$(echo "$TRACE_OUTPUT" | jq -r '.gasUsed // 0')
+          # FlashLoan Event Topic (Aave/Uniswap): 0x631042c832bcc20bb41e797852b6346654e95123d57f9202359b8705973e8293
+          # Using grep on json string for speed/simplicity
+          if echo "$TRACE_OUTPUT" | grep -q "631042c832bcc20bb41e797852b6346654e95123d57f9202359b8705973e8293"; then
+             echo "is_flashloan=true" >> $GITHUB_OUTPUT
+          else
+             echo "is_flashloan=false" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "gas_used=$GAS_USED" >> $GITHUB_OUTPUT
+
+          case $CHAIN_ID in
+            1) echo "rpc_alias=mainnet" >> $GITHUB_OUTPUT ;;
+            8453) echo "rpc_alias=base" >> $GITHUB_OUTPUT ;;
+            42161) echo "rpc_alias=arbitrum" >> $GITHUB_OUTPUT ;;
+            10) echo "rpc_alias=optimism" >> $GITHUB_OUTPUT ;;
+            137) echo "rpc_alias=polygon" >> $GITHUB_OUTPUT ;;
+            56) echo "rpc_alias=bsc" >> $GITHUB_OUTPUT ;;
+            43114) echo "rpc_alias=avalanche" >> $GITHUB_OUTPUT ;;
+            250) echo "rpc_alias=fantom" >> $GITHUB_OUTPUT ;;
+            59144) echo "rpc_alias=linea" >> $GITHUB_OUTPUT ;;
+            81457) echo "rpc_alias=blast" >> $GITHUB_OUTPUT ;;
+            42220) echo "rpc_alias=celo" >> $GITHUB_OUTPUT ;;
+            324) echo "rpc_alias=zksync" >> $GITHUB_OUTPUT ;;
+            5000) echo "rpc_alias=mantle" >> $GITHUB_OUTPUT ;;
+            204) echo "rpc_alias=opbnb" >> $GITHUB_OUTPUT ;;
+            534352) echo "rpc_alias=scroll" >> $GITHUB_OUTPUT ;;
+            1329) echo "rpc_alias=sei" >> $GITHUB_OUTPUT ;;
+            11297108109) echo "rpc_alias=palm" >> $GITHUB_OUTPUT ;;
+            *) echo "rpc_alias=mainnet" >> $GITHUB_OUTPUT ;;
+          esac
+
+          BRANCH_NAME="incident/${DATE_STR}_${{ steps.parse.outputs.protocol }}"
+          BRANCH_NAME=${BRANCH_NAME// /-}
+          echo "TARGET_BRANCH=$BRANCH_NAME" >> $GITHUB_ENV
+
+      - name: Handle Fetch Error
+        if: failure() && steps.metadata.outcome == 'failure'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const errorMsg = process.env.FETCH_ERROR || 'Unknown error occurred.';
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['invalid-input']
+            });
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `**Error: Failed to Fetch Transaction**\n\n${errorMsg}`
+            });
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              state: 'closed'
+            });
+
+      - name: Generate Templates
+        env:
+          AUDITORS_JSON: ${{ steps.parse.outputs.auditors }}
+        run: |
+          git config --global user.name "AuditBot"
+          git config --global user.email "bot@audit.org"
+          git checkout -b ${{ env.TARGET_BRANCH }}
+
+          PROTOCOL_RAW="${{ steps.parse.outputs.protocol }}"
+          PROTOCOL=$(echo "$PROTOCOL_RAW" | sed 's/[^a-zA-Z0-9]/_/g' | sed 's/__*/_/g' | sed 's/^_//;s/_$//')
+          DATE="${{ steps.metadata.outputs.date }}"
+          BLOCK="${{ steps.metadata.outputs.block_number }}"
+          FORK_BLOCK="${{ steps.metadata.outputs.fork_block }}"
+          CHAIN_ID="${{ steps.parse.outputs.chain_id }}"
+          TXHASH="${{ steps.parse.outputs.txhash }}"
+          ATTACKER="${{ steps.metadata.outputs.attacker }}"
+          TARGET="${{ steps.metadata.outputs.target }}"
+          INPUT_DATA="${{ steps.metadata.outputs.input_data }}"
+          RPC_ALIAS="${{ steps.metadata.outputs.rpc_alias }}"
+          GAS_USED="${{ steps.metadata.outputs.gas_used }}"
+
+          DIR="test/${DATE}_${PROTOCOL}"
+          mkdir -p "$DIR"
+          mkdir -p "data/results"
+
+          cat > "$DIR/${PROTOCOL}Base.sol" << SOLEOF
+          // SPDX-License-Identifier: UNLICENSED
+          pragma solidity ^0.8.10;
+
+          import "src/shared/BaseTest.sol";
+          import "src/shared/FeatureTypes.sol";
+          import "src/shared/interfaces.sol";
+
+          /*
+          @Protocol: ${PROTOCOL_RAW}
+          @Date: ${DATE}
+          @Attacker: ${ATTACKER}
+          @Target: ${TARGET}
+          @TxHash: ${TXHASH}
+          @ChainId: ${CHAIN_ID}
+          @GasUsed: ${GAS_USED}
+          */
+
+          abstract contract ${PROTOCOL}Base is BaseTest {
+              function setUp() public virtual {
+                  vm.createSelectFork("${RPC_ALIAS}", ${FORK_BLOCK});
+                  target = ${TARGET};
+              }
+          }
+          SOLEOF
+
+          INPUT_HEX="${INPUT_DATA#0x}"
+          cat > "$DIR/Replay.t.sol" << SOLEOF
+          // SPDX-License-Identifier: UNLICENSED
+          pragma solidity ^0.8.10;
+
+          import "./${PROTOCOL}Base.sol";
+
+          contract ReplayTest is ${PROTOCOL}Base {
+              address constant ATTACKER_ADDR = ${ATTACKER};
+              address constant TARGET_ADDR = ${TARGET};
+              bytes constant INPUT_DATA = hex"${INPUT_HEX}";
+
+              function testReplay() public {
+                  beneficiary = ATTACKER_ADDR;
+                  if (fundingToken == address(0)) vm.deal(address(this), 0);
+                  _logTokenBalance(fundingToken, beneficiary, "[REPLAY] Before");
+                  
+                  uint256 gasBefore = gasleft();
+                  try this._executeReplay() {
+                      uint256 gasUsed = gasBefore - gasleft();
+                      (string memory symbol, uint256 balance, uint8 decimals) = _getTokenData(fundingToken, beneficiary);
+                      _logTokenBalance(fundingToken, beneficiary, "[REPLAY] After");
+                      _writeExecutionResult("REPLAY", gasUsed, balance, symbol, decimals);
+                  } catch Error(string memory reason) {
+                      uint256 gasUsed = gasBefore - gasleft();
+                      _writePartialResult("REPLAY_FAILED", reason, gasUsed);
+                      emit log_string(string(abi.encodePacked("[REPLAY] Reverted: ", reason)));
+                      revert(reason);
+                  } catch (bytes memory) {
+                      uint256 gasUsed = gasBefore - gasleft();
+                      _writePartialResult("REPLAY_FAILED", "Low-level revert", gasUsed);
+                      emit log_string("[REPLAY] Low-level revert");
+                      revert("Low-level revert");
+                  }
+              }
+
+              function _executeReplay() external {
+                  vm.startPrank(ATTACKER_ADDR);
+                  (bool success, bytes memory returnData) = TARGET_ADDR.call(INPUT_DATA);
+                  if (!success) {
+                      if (returnData.length > 0) {
+                          assembly {
+                              revert(add(returnData, 32), mload(returnData))
+                          }
+                      }
+                      revert("Replay failed");
+                  }
+                  vm.stopPrank();
+              }
+          }
+          SOLEOF
+
+          AUDITORS_LIST=$(echo "$AUDITORS_JSON" | jq -r '.[] | "- [ ] @\(.)"')
+          cat > "$DIR/README.md" << MDEOF
+          # ${PROTOCOL_RAW} Incident
+
+          | Field | Value |
+          |-------|-------|
+          | Date | ${DATE} |
+          | Chain | ${CHAIN_ID} |
+          | Block | ${BLOCK} |
+          | Tx | \`${TXHASH}\` |
+          | Attacker | \`${ATTACKER}\` |
+          | Target | \`${TARGET}\` |
+          | Gas Used | ${GAS_USED} |
+
+          ## Auditors
+          ${AUDITORS_LIST}
+
+          ## Status
+          - [x] Workspace initialized
+          - [ ] Replay verified
+          - [ ] Analysis complete
+          MDEOF
+
+          for auditor in $(echo "$AUDITORS_JSON" | jq -r '.[]'); do
+            cat > "$DIR/PoC_${auditor}.t.sol" << SOLEOF
+          // SPDX-License-Identifier: UNLICENSED
+          pragma solidity ^0.8.10;
+
+          import "./${PROTOCOL}Base.sol";
+
+          contract PoC_${auditor} is ${PROTOCOL}Base {
+              function testExploit() public exploit {
+                  addVulnerability(VulnerabilityType.UNKNOWN);
+                  addAttackVector(AttackVector.UNKNOWN);
+                  addMitigation(Mitigation.UNKNOWN);
+              }
+          }
+          SOLEOF
+          done
+
+      - name: Verify Replay
+        id: verify
+        env:
+          INFURA_KEY: ${{ secrets.INFURA_API_KEY }}
+        run: |
+          if [ -n "$INFURA_KEY" ]; then
+            export MAINNET_RPC_URL="https://mainnet.infura.io/v3/$INFURA_KEY"
+            export BASE_RPC_URL="https://base-mainnet.infura.io/v3/$INFURA_KEY"
+            export ARBITRUM_RPC_URL="https://arbitrum-mainnet.infura.io/v3/$INFURA_KEY"
+            export OPTIMISM_RPC_URL="https://optimism-mainnet.infura.io/v3/$INFURA_KEY"
+            export POLYGON_RPC_URL="https://polygon-mainnet.infura.io/v3/$INFURA_KEY"
+            export BSC_RPC_URL="https://bsc-mainnet.infura.io/v3/$INFURA_KEY"
+            export AVALANCHE_RPC_URL="https://avalanche-mainnet.infura.io/v3/$INFURA_KEY"
+            export FANTOM_RPC_URL="https://fantom-mainnet.infura.io/v3/$INFURA_KEY"
+            export LINEA_RPC_URL="https://linea-mainnet.infura.io/v3/$INFURA_KEY"
+            export BLAST_RPC_URL="https://blast-mainnet.infura.io/v3/$INFURA_KEY"
+            export CELO_RPC_URL="https://celo-mainnet.infura.io/v3/$INFURA_KEY"
+            export ZKSYNC_RPC_URL="https://zksync-mainnet.infura.io/v3/$INFURA_KEY"
+            export MANTLE_RPC_URL="https://mantle-mainnet.infura.io/v3/$INFURA_KEY"
+            export OPBNB_RPC_URL="https://opbnb-mainnet.infura.io/v3/$INFURA_KEY"
+            export SCROLL_RPC_URL="https://scroll-mainnet.infura.io/v3/$INFURA_KEY"
+            export SEI_RPC_URL="https://sei-mainnet.infura.io/v3/$INFURA_KEY"
+            export PALM_RPC_URL="https://palm-mainnet.infura.io/v3/$INFURA_KEY"
+          else
+            export MAINNET_RPC_URL="https://eth.llamarpc.com"
+            export BASE_RPC_URL="https://mainnet.base.org"
+            export ARBITRUM_RPC_URL="https://arb1.arbitrum.io/rpc"
+            export OPTIMISM_RPC_URL="https://mainnet.optimism.io"
+            export POLYGON_RPC_URL="https://polygon-rpc.com"
+            export BSC_RPC_URL="https://bsc-dataseed.binance.org"
+            export AVALANCHE_RPC_URL="https://api.avax.network/ext/bc/C/rpc"
+            export FANTOM_RPC_URL="https://rpc.ftm.tools"
+            export LINEA_RPC_URL="https://rpc.linea.build"
+            export BLAST_RPC_URL="https://rpc.blast.io"
+            export CELO_RPC_URL="https://forno.celo.org"
+            export ZKSYNC_RPC_URL="https://mainnet.era.zksync.io"
+            export MANTLE_RPC_URL="https://rpc.mantle.xyz"
+            export OPBNB_RPC_URL="https://opbnb-mainnet-rpc.binance.org"
+            export SCROLL_RPC_URL="https://rpc.scroll.io"
+            export SEI_RPC_URL="https://evm.sei.io"
+            export PALM_RPC_URL="https://palm-mainnet.public.blastapi.io"
+          fi
+          if forge test --match-test testReplay -vvv 2>&1 | tee replay_result.txt | grep -q "PASS"; then
+            echo "REPLAY_STATUS=PASS" >> $GITHUB_ENV
+          else
+            echo "REPLAY_STATUS=FAIL" >> $GITHUB_ENV
+          fi
+
+      - name: Commit and Push
+        run: |
+          git add .
+          git commit -m "init: ${{ steps.parse.outputs.protocol }}"
+          git push origin ${{ env.TARGET_BRANCH }}
+
+      - name: Extract Replay Error
+        if: env.REPLAY_STATUS == 'FAIL'
+        id: replay_error
+        run: |
+          if [ -f replay_result.txt ]; then
+            REVERT_REASON=$(grep -oP '(?<=\[Revert\] ).*' replay_result.txt | head -1 || echo "Unknown")
+            echo "revert_reason=$REVERT_REASON" >> $GITHUB_OUTPUT
+            
+            case "$REVERT_REASON" in
+              *"Owner"*|*"owner"*|*"Ownable"*)
+                echo "diagnosis=Permission issue" >> $GITHUB_OUTPUT
+                echo "guide=Use vm.prank(ownerAddress)" >> $GITHUB_OUTPUT
+                ;;
+              *"balance"*|*"Insufficient"*|*"underflow"*)
+                echo "diagnosis=Insufficient balance" >> $GITHUB_OUTPUT
+                echo "guide=Use vm.deal or deal()" >> $GITHUB_OUTPUT
+                ;;
+              *)
+                echo "diagnosis=Unknown revert" >> $GITHUB_OUTPUT
+                echo "guide=Analyze trace with -vvvv" >> $GITHUB_OUTPUT
+                ;;
+            esac
+          else
+            echo "revert_reason=Unknown" >> $GITHUB_OUTPUT
+            echo "diagnosis=No trace found" >> $GITHUB_OUTPUT
+            echo "guide=Run locally" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update Smart Labels
+        uses: actions/github-script@v6
+        env:
+          IS_FLASHLOAN: ${{ steps.metadata.outputs.is_flashloan }}
+          GAS_USED: ${{ steps.metadata.outputs.gas_used }}
+          REPLAY_STATUS: ${{ env.REPLAY_STATUS }}
+        with:
+          script: |
+            const labelsToAdd = [];
+            const isFlashloan = process.env.IS_FLASHLOAN === 'true';
+            const gasUsed = parseInt(process.env.GAS_USED) || 0;
+            const replayStatus = process.env.REPLAY_STATUS;
+
+            if (isFlashloan) labelsToAdd.push('flashloan');
+            if (gasUsed > 500000) labelsToAdd.push('complex');
+            if (replayStatus === 'PASS') labelsToAdd.push('verified');
+            else labelsToAdd.push('needs-manual-poc');
+
+            if (labelsToAdd.length > 0) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: labelsToAdd
+              });
+            }
+
+      - name: Notify
+        uses: actions/github-script@v6
+        env:
+          TARGET_BRANCH: ${{ env.TARGET_BRANCH }}
+          BLOCK: ${{ steps.metadata.outputs.block_number }}
+          DATE: ${{ steps.metadata.outputs.date }}
+          REPLAY_STATUS: ${{ env.REPLAY_STATUS }}
+          AUDITORS_JSON: ${{ steps.parse.outputs.auditors }}
+          REVERT_REASON: ${{ steps.replay_error.outputs.revert_reason }}
+          DIAGNOSIS: ${{ steps.replay_error.outputs.diagnosis }}
+          GUIDE: ${{ steps.replay_error.outputs.guide }}
+          GAS_USED: ${{ steps.metadata.outputs.gas_used }}
+          IS_FLASHLOAN: ${{ steps.metadata.outputs.is_flashloan }}
+        with:
+          script: |
+            const branch = process.env.TARGET_BRANCH;
+            const block = process.env.BLOCK;
+            const date = process.env.DATE;
+            const replayStatus = process.env.REPLAY_STATUS;
+            const auditors = JSON.parse(process.env.AUDITORS_JSON);
+            const mentions = auditors.map(a => `@${a}`).join(' ');
+            const gasUsed = process.env.GAS_USED;
+            const isFlashloan = process.env.IS_FLASHLOAN === 'true' ? 'Yes' : 'No';
+            
+            const lines = [
+              "**Workspace Ready**",
+              "",
+              "| Item | Value |",
+              "|------|-------|",
+              `| Branch | \`${branch}\` |`,
+              `| Date | ${date} |`,
+              `| Block | ${block} |`,
+              `| Gas Used | ${gasUsed} |`,
+              `| Flashloan | ${isFlashloan} |`,
+              `| Replay | ${replayStatus === 'PASS' ? '✅ Verified' : '❌ Failed'} |`,
+              "",
+              `**Assigned:** ${mentions}`,
+              "",
+              "```bash",
+              `git fetch origin && git checkout ${branch}`,
+              "```"
+            ];
+
+            if (replayStatus !== 'PASS') {
+              lines.push(
+                "",
+                "---",
+                "",
+                "**Replay Failed - Manual PoC Required**",
+                "",
+                "| Analysis | Details |",
+                "|----------|---------|",
+                `| Reason | \`${process.env.REVERT_REASON}\` |`,
+                `| Diagnosis | ${process.env.DIAGNOSIS} |`,
+                `| Guide | ${process.env.GUIDE} |`
+              );
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: lines.join("\n")
+            });
