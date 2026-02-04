@@ -190,21 +190,23 @@ jobs:
           echo "target=$TARGET" >> $GITHUB_OUTPUT
           echo "input_data=$INPUT_DATA" >> $GITHUB_OUTPUT
 
-          # 2. Analyze Trace (Advanced)
-          echo "Running Trace Analysis..."
-          # cast run is heavy, handle errors gracefully
-          TRACE_OUTPUT=$(cast run $TXHASH --rpc-url $RPC_URL --json 2>/dev/null || echo "{}")
-          
-          GAS_USED=$(echo "$TRACE_OUTPUT" | jq -r '.gasUsed // 0')
+          # 2. Analyze Receipt (lighter than cast run, works with public RPCs)
+          echo "Fetching Transaction Receipt..."
+          RECEIPT=$(cast receipt $TXHASH --rpc-url $RPC_URL --json 2>/dev/null || echo "{}")
+
+          GAS_USED_HEX=$(echo "$RECEIPT" | jq -r '.gasUsed // "0x0"')
+          GAS_USED=$((GAS_USED_HEX))
+          LOGS_COUNT=$(echo "$RECEIPT" | jq '[.logs[].topics[0]] | length')
+
           # FlashLoan Event Topic (Aave/Uniswap): 0x631042c832bcc20bb41e797852b6346654e95123d57f9202359b8705973e8293
-          # Using grep on json string for speed/simplicity
-          if echo "$TRACE_OUTPUT" | grep -q "631042c832bcc20bb41e797852b6346654e95123d57f9202359b8705973e8293"; then
+          if echo "$RECEIPT" | jq -e '[.logs[].topics[0]] | any(. == "0x631042c832bcc20bb41e797852b6346654e95123d57f9202359b8705973e8293")' > /dev/null 2>&1; then
              echo "is_flashloan=true" >> $GITHUB_OUTPUT
           else
              echo "is_flashloan=false" >> $GITHUB_OUTPUT
           fi
-          
+
           echo "gas_used=$GAS_USED" >> $GITHUB_OUTPUT
+          echo "logs_count=$LOGS_COUNT" >> $GITHUB_OUTPUT
 
           case $CHAIN_ID in
             1) echo "rpc_alias=mainnet" >> $GITHUB_OUTPUT ;;
@@ -276,10 +278,12 @@ jobs:
           INPUT_DATA="${{ steps.metadata.outputs.input_data }}"
           RPC_ALIAS="${{ steps.metadata.outputs.rpc_alias }}"
           GAS_USED="${{ steps.metadata.outputs.gas_used }}"
+          LOGS_COUNT="${{ steps.metadata.outputs.logs_count }}"
 
           DIR="test/${DATE}_${PROTOCOL}"
           mkdir -p "$DIR"
-          mkdir -p "data/results"
+          mkdir -p "data/verified"
+          mkdir -p "data/local"
 
           cat > "$DIR/${PROTOCOL}Base.sol" << SOLEOF
           // SPDX-License-Identifier: UNLICENSED
@@ -303,6 +307,7 @@ jobs:
               function setUp() public virtual {
                   vm.createSelectFork("${RPC_ALIAS}", ${FORK_BLOCK});
                   target = ${TARGET};
+                  txHash = ${TXHASH};
               }
           }
           SOLEOF
@@ -372,6 +377,7 @@ jobs:
           | Attacker | \`${ATTACKER}\` |
           | Target | \`${TARGET}\` |
           | Gas Used | ${GAS_USED} |
+          | Logs | ${LOGS_COUNT} |
 
           ## Auditors
           ${AUDITORS_LIST}
@@ -458,7 +464,11 @@ jobs:
         id: replay_error
         run: |
           if [ -f replay_result.txt ]; then
-            REVERT_REASON=$(grep -oP '(?<=\[Revert\] ).*' replay_result.txt | head -1 || echo "Unknown")
+            # Match [Revert], [NotActivated], EvmError, vm.writeJson patterns
+            REVERT_REASON=$(grep -oP '(\[Revert\] |\[NotActivated\] |EvmError: |vm\.writeJson: )\K.*' replay_result.txt | head -1)
+            if [ -z "$REVERT_REASON" ]; then
+              REVERT_REASON="Unknown"
+            fi
             echo "revert_reason=$REVERT_REASON" >> $GITHUB_OUTPUT
             
             case "$REVERT_REASON" in
@@ -469,6 +479,14 @@ jobs:
               *"balance"*|*"Insufficient"*|*"underflow"*)
                 echo "diagnosis=Insufficient balance" >> $GITHUB_OUTPUT
                 echo "guide=Use vm.deal or deal()" >> $GITHUB_OUTPUT
+                ;;
+              *"NotActivated"*)
+                echo "diagnosis=EVM opcode not supported" >> $GITHUB_OUTPUT
+                echo "guide=Update evm_version in foundry.toml (try cancun or prague)" >> $GITHUB_OUTPUT
+                ;;
+              *"No such file or directory"*|*"writeJson"*)
+                echo "diagnosis=Output directory missing" >> $GITHUB_OUTPUT
+                echo "guide=Directory auto-created on retry, or run: mkdir -p data/local data/verified" >> $GITHUB_OUTPUT
                 ;;
               *)
                 echo "diagnosis=Unknown revert" >> $GITHUB_OUTPUT
@@ -520,6 +538,7 @@ jobs:
           DIAGNOSIS: ${{ steps.replay_error.outputs.diagnosis }}
           GUIDE: ${{ steps.replay_error.outputs.guide }}
           GAS_USED: ${{ steps.metadata.outputs.gas_used }}
+          LOGS_COUNT: ${{ steps.metadata.outputs.logs_count }}
           IS_FLASHLOAN: ${{ steps.metadata.outputs.is_flashloan }}
         with:
           script: |
@@ -530,6 +549,7 @@ jobs:
             const auditors = JSON.parse(process.env.AUDITORS_JSON);
             const mentions = auditors.map(a => `@${a}`).join(' ');
             const gasUsed = process.env.GAS_USED;
+            const logsCount = process.env.LOGS_COUNT;
             const isFlashloan = process.env.IS_FLASHLOAN === 'true' ? 'Yes' : 'No';
             
             const lines = [
@@ -541,6 +561,7 @@ jobs:
               `| Date | ${date} |`,
               `| Block | ${block} |`,
               `| Gas Used | ${gasUsed} |`,
+              `| Logs | ${logsCount} |`,
               `| Flashloan | ${isFlashloan} |`,
               `| Replay | ${replayStatus === 'PASS' ? '✅ Verified' : '❌ Failed'} |`,
               "",

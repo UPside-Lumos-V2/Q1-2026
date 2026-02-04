@@ -6,48 +6,88 @@ on:
       - main
   pull_request:
     branches:
-      - incident/*
+      - main
 
 jobs:
-  # 1. Compliance Check (Runs on every PR)
+  # PR: Compliance Check only (lightweight validation)
+  # Fork PR에서는 GITHUB_TOKEN이 포크 저장소를 읽을 수 없어 checkout 시 "Repository not found" 발생.
+  # 같은 저장소 내 브랜치 PR에서만 실행.
   compliance:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
     steps:
       - uses: actions/checkout@v3
         with:
-          fetch-depth: 0 # Needed for git diff
-      
-      - name: Check Restricted Files
+          fetch-depth: 0
+
+      - name: Run Compliance Check
+        id: check
         run: |
           chmod +x script/check_compliance.sh
-          ./script/check_compliance.sh
+          set +e
+          OUTPUT=$(./script/check_compliance.sh 2>&1)
+          EXIT_CODE=$?
+          set -e
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+          # Handle multiline output
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "result<<$EOF" >> $GITHUB_OUTPUT
+          echo "$OUTPUT" >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT
 
-  # 2. Verify & Mine (Runs on PR to Incident branch)
-  verify_mine:
-    needs: compliance
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: foundry-rs/foundry-toolchain@v1
-      
-      - name: Run Tests (Verified Mode)
-        env:
-          CI: true # This triggers data/verified/ path
-          # Secrets needed for forking
-          MAINNET_RPC_URL: ${{ secrets.MAINNET_RPC_URL }}
-        run: forge test -vvv
-      
-      - name: Upload Verified Artifacts
-        uses: actions/upload-artifact@v3
+      - name: Comment on PR
+        uses: actions/github-script@v6
         with:
-          name: verified-data
-          path: data/verified/*.json
-          retention-days: 1
+          script: |
+            const output = `${{ steps.check.outputs.result }}`;
+            const exitCode = '${{ steps.check.outputs.exit_code }}';
+            const status = exitCode === '0' ? 'Passed' : 'Failed';
+            const icon = exitCode === '0' ? ':white_check_mark:' : ':x:';
 
-  # 3. Aggregate (Runs only on Push to Main)
+            const body = `### ${icon} Compliance Check: ${status}
+
+            \`\`\`
+            ${output}
+            \`\`\`
+
+            <sub>Commit: ${{ github.event.pull_request.head.sha }}</sub>`;
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('Compliance Check')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
+
+      - name: Fail if violations
+        if: steps.check.outputs.exit_code != '0'
+        run: exit 1
+
+  # Main push (after merge): Data Mining
   aggregate:
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -56,21 +96,17 @@ jobs:
       - uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-      
-      # In a real scenario, we would download artifacts from the PR that was just merged.
-      # However, since artifacts don't persist across workflow runs easily without external storage,
-      # we re-run the tests on main to generate the official "Golden Data".
       - uses: foundry-rs/foundry-toolchain@v1
-      
+
       - name: Generate Official Data
         env:
           CI: true
           MAINNET_RPC_URL: ${{ secrets.MAINNET_RPC_URL }}
         run: forge test -vvv
-        
+
       - name: Aggregate to CSV
         run: python3 script/json_to_csv.py
-        
+
       - name: Commit Dataset
         uses: stefanzweifel/git-auto-commit-action@v4
         with:

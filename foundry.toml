@@ -4,7 +4,7 @@ out = 'out'
 libs = ['lib']
 fs_permissions = [{ access = "read", path = "./"}, { access = "write", path = "./data/"}]
 auto_detect_solc = true
-evm_version = 'shanghai'
+evm_version = 'cancun'
 optimizer = true
 optimizer_runs = 200
 

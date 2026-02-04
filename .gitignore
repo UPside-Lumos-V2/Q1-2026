@@ -11,5 +11,8 @@ dist/
 # VS Code
 .vscode/
 .claude/
+# Workflow temp files
+replay_result.txt
+
 # System
 .DS_Store

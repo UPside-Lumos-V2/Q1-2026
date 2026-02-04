@@ -16,10 +16,20 @@ def aggregate_data():
 
     # Define CSV Headers
     headers = [
-        "mode", "chain_id", "block_number", "block_timestamp", 
-        "gas_used", "realized_profit", "token_symbol", "token_decimals", 
+        "tx_hash", "mode", "chain_id", "block_number", "block_timestamp",
+        "gas_used", "realized_profit", "token_symbol", "token_decimals",
         "token_address", "victim_code_size", "success"
     ]
+
+    # Read existing tx_hashes to avoid duplicates
+    existing_hashes = set()
+    file_exists = os.path.isfile(OUTPUT_FILE)
+    if file_exists:
+        with open(OUTPUT_FILE, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get('tx_hash'):
+                    existing_hashes.add(row['tx_hash'])
 
     # Initialize list for new rows
     new_rows = []
@@ -28,17 +38,18 @@ def aggregate_data():
         try:
             with open(file_path, 'r') as f:
                 data = json.load(f)
-                
+
+                tx_hash = data.get('tx_hash')
+                # Skip if already in CSV
+                if tx_hash and tx_hash in existing_hashes:
+                    print(f"Skipping duplicate: {tx_hash}")
+                    continue
+
                 # Create a row with default None for missing keys
                 row = {header: data.get(header, None) for header in headers}
                 new_rows.append(row)
         except Exception as e:
             print(f"Error reading {file_path}: {e}")
-
-    # Read existing CSV to avoid duplicates (Optional logic could go here)
-    # For now, we append. In a production system, we'd dedup based on block/tx.
-    
-    file_exists = os.path.isfile(OUTPUT_FILE)
     
     with open(OUTPUT_FILE, 'a', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=headers)
