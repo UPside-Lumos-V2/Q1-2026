@@ -539,6 +539,7 @@ contract BaseTest is Test {
     }
 
     /// @notice Main exploit modifier - call addVulnerability(), addAttackVector(), addMitigation() inside
+    /// @dev Automatically tracks fundingToken balance and records profit if positive
     modifier exploit() {
         uint256 startGas = gasleft();
         address user = beneficiary == address(0) ? address(this) : beneficiary;
@@ -551,6 +552,8 @@ contract BaseTest is Test {
 
         vm.record();
 
+        // Capture starting balance for automatic profit tracking
+        (string memory symbol, uint256 startBalance, uint8 decimals) = _getTokenData(fundingToken, user);
         if (fundingToken == address(0)) vm.deal(user, 0);
         _logTokenBalance(fundingToken, user, "[EXPLOIT] Before");
 
@@ -579,7 +582,15 @@ contract BaseTest is Test {
                 StorageDelta({slot: writes[i], valueBefore: bytes32(0), valueAfter: vm.load(target, writes[i])});
         }
 
+        // Auto-record profit if balance increased
+        (, uint256 endBalance,) = _getTokenData(fundingToken, user);
+
         _logTokenBalance(fundingToken, user, "[EXPLOIT] After");
+        if (endBalance > startBalance) {
+            uint256 profit = endBalance - startBalance;
+            profitRecords.push(ProfitRecord({token: fundingToken, amount: profit, symbol: symbol, decimals: decimals}));
+            emit log_named_decimal_uint(string(abi.encodePacked("[EXPLOIT] Profit ", symbol)), profit, decimals);
+        }
         _writeExploitResult("EXPLOIT", gasUsed, deltas);
 
         // Clear state for next test

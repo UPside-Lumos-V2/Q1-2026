@@ -393,6 +393,8 @@ interface IERC20 {
         uint256 value
     ) external returns (bool);
 
+    function burn(uint256 value) external returns (bool);
+
     function transferFrom(
         address from,
         address to,
