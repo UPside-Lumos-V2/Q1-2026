@@ -17,7 +17,7 @@ import "src/shared/interfaces.sol";
 
 abstract contract Makina_FinanceBase is BaseTest {
     function setUp() public virtual {
-        vm.createSelectFork("mainnet", 24273361);
+        vm.createSelectFork("mainnet", 24_273_361);
         target = 0x935bfb495E33f74d2E9735DF1DA66acE442ede48;
         txHash = 0x569733b8016ef9418f0b6bde8c14224d9e759e79301499908ecbcd956a0651f5;
     }
