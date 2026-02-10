@@ -16,3 +16,6 @@ replay_result.txt
 
 # System
 .DS_Store
+
+# Secrets
+.env
