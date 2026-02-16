@@ -1,28 +1,16 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.10;
 
-import "src/shared/BaseTest.sol";
-import "src/shared/interfaces.sol";
+// CrossCurve.sol은 더 이상 사용하지 않습니다.
+// IncidentBase.sol로 마이그레이션되었습니다.
+//
+// 파일 구조:
+//   IncidentBase.sol    ← 주소, 인터페이스, setUp (이 파일을 대체)
+//   PoC_template.t.sol  ← exploit 로직 (직접 작성)
+//   Replay.t.sol        ← calldata 리플레이
+//   README.md           ← 사건 분석 보고서
+//
+// 이 파일은 기존 호환성을 위해 유지되며,
+// IncidentBase.sol을 re-export합니다.
 
-/*
-@Protocol: CrossCurve
-@Date: 2026-02-01
-@Attacker: 0x632400F42e96A5DEB547a179ca46b02C22CD25cD
-@Target: 0xB2185950F5A0A46687ac331916508aadA202e063
-@TxHash: 0x37d9b911ef710be851a2e08e1cfc61c2544db0f208faeade29ee98cc7506ccc2
-@ChainId: 1
-@GasUsed: 618071
-*/
-
-contract CrossCurveTest is BaseTest {
-    function setUp() public {
-        vm.createSelectFork("mainnet", 24363853);
-        target = 0xB2185950F5A0A46687ac331916508aadA202e063;
-    }
-
-    function testExploit() public balanceLog {
-        // TODO: Implement exploit
-        // Set beneficiary if needed: beneficiary = address(0x123);
-        // Profit will be automatically calculated and logged
-    }
-}
+import "./IncidentBase.sol";
