@@ -1,6 +1,5 @@
 # Data Directories
-data/local/
-data/verified/
+data/
 
 # Environment
 .env
