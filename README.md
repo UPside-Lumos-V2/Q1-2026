@@ -2,6 +2,31 @@
 
 Simplified template for analyzing DeFi security incidents with Foundry.
 
+## Case Study: Aperture Finance (Arbitrary External Call via Split Spender/Target)
+
+This repo now includes a reproduced PoC for the Aperture Finance incident (`test/2026-01-25_Aperture_Finance/Aperture_Finance.sol`).
+
+### What the exploit demonstrates
+
+- The target contract executes a user-supplied swap descriptor during a mint flow.
+- The descriptor separates:
+  - `approve` spender (looks like a router)
+  - actual low-level call target
+  - raw calldata payload
+- Because the actual call target and payload are not constrained tightly enough, an attacker can route execution to an ERC20 token contract and call `transferFrom(...)` instead of a swap.
+
+### Exploit shape (high level)
+
+1. Wrap `msg.value` into WETH (normal-looking flow).
+2. Approve a router-like spender for a small WETH amount.
+3. Execute a low-level call against `WBTC` with payload `transferFrom(victim, attacker, amount)`.
+4. Continue mint flow so the transaction appears structurally valid.
+
+### Why this PoC is useful
+
+- It replays the original attack calldata byte-for-byte.
+- It includes a mutation test that changes only the **actual low-level call target** and shows the exploit fails, isolating the root cause.
+
 ## Workflow
 
 ```
