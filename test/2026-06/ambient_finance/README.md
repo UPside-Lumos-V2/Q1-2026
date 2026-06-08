@@ -6,13 +6,13 @@ _Deterministic final report assembled from existing LumosKit outputs; this final
 
 - **Chain**: ethereum (chain_id=1)
 - **Tx hash**: `0xb2fc668c42623261074de6fc30d583efede2b0e20d7aded42b7b634f9322ff52`
-- **Block**: unknown
-- **Final quality**: `blocked`
+- **Block**: 25266405
+- **Final quality**: `pass`
 - **Product/PoC gate**: `pass`
 - **Final-quality basis**: `poc_and_rca`
-- **Final-quality reason**: Verified economic PoC exists, but RCA is blocked: missing /srv/helios/data/outputs/260608_eth_ambient_finance-8/artifacts/rca/rca_iterations.jsonl; missing /srv/helios/data/outputs/260608_eth_ambient_finance-8/artifacts/rca/rca.md; missing /srv/helios/data/outputs/260608_eth_ambient_finance-8/artifacts/rca/report.json
-- **Elapsed**: 216.51s (216513 ms)
-- **Finding**: RCA blocked
+- **Final-quality reason**: Verified economic PoC and complete RCA.
+- **Elapsed**: 578.96s (578962 ms)
+- **Finding**: Ambient concentrated LP harvest bypasses the JIT fee-resting guard
 
 ## Signal context
 
@@ -22,23 +22,23 @@ _Deterministic final report assembled from existing LumosKit outputs; this final
 
 ## Pipeline timing
 
-- **Orchestrator wall time**: 65.96s (65962 ms)
+- **Orchestrator wall time**: 427.53s (427532 ms)
 
-- **Current stage-duration sum**: 216.51s (216513 ms)
+- **Current stage-duration sum**: 578.96s (578962 ms)
 
 | Stage | Artifact | Duration | Status |
 |---|---|---:|---|
-| `1` | `cefg` | 78.52s (78523 ms) | `success` |
+| `1` | `cefg` | 81.03s (81028 ms) | `success` |
 | `2` | `localize` | 158 ms | `success` |
-| `3` | `lift` | 474 ms | `success` |
-| `4` | `flow_context` | 19.79s (19790 ms) | `success` |
-| `5` | `enrich` | 10.26s (10262 ms) | `success` |
+| `3` | `lift` | 466 ms | `success` |
+| `4` | `flow_context` | 19.51s (19513 ms) | `success` |
+| `5` | `enrich` | 9.62s (9622 ms) | `success` |
 | `6` | `context_pack` | 22 ms | `success` |
-| `7` | `asset_delta` | 69 ms | `success` |
-| `8` | `poc_sketch` | 173 ms | `success` |
-| `9` | `semantic` | 564 ms | `success` |
-| `agent_poc` | `agent_poc` | 40.52s (40516 ms) | `success` |
-| `rca` | `rca` | 65.96s (65962 ms) | `success` |
+| `7` | `asset_delta` | 73 ms | `success` |
+| `8` | `poc_sketch` | 171 ms | `success` |
+| `9` | `semantic` | 545 ms | `success` |
+| `agent_poc` | `agent_poc` | 39.83s (39831 ms) | `success` |
+| `rca` | `rca` | 427.53s (427533 ms) | `success` |
 
 ## Reproduction quality
 
@@ -47,8 +47,8 @@ _Deterministic final report assembled from existing LumosKit outputs; this final
 - **Forge build**: `pass`
 - **Forge test**: `pass`
 - **Proof kind**: `economic_proof`
-- **RCA status**: `blocked` / `blocked`
-- **RCA confidence**: `unknown`
+- **RCA status**: `complete` / `complete`
+- **RCA confidence**: `high`
 
 ## Economic reproduction
 
@@ -127,14 +127,26 @@ _… truncated in final report; see source artifact for full text._
 
 ## Root cause analysis
 
-# RCA blocked
+- **Title**: Ambient concentrated LP harvest bypasses the JIT fee-resting guard
+- **Severity**: `critical`
+- **Confidence**: `high`
+- **Violated invariant**: A concentrated LP position must not collect fee rewards until it satisfies the same pool jitThresh/time-priority eligibility enforced for burning or withdrawing reward-bearing liquidity.
 
-- stage: `rca`
-- status: `blocked`
-- validation: `blocked`
-- blocker: missing /srv/helios/data/outputs/260608_eth_ambient_finance-8/artifacts/rca/rca_iterations.jsonl; missing /srv/helios/data/outputs/260608_eth_ambient_finance-8/artifacts/rca/rca.md; missing /srv/helios/data/outputs/260608_eth_ambient_finance-8/artifacts/rca/report.json
+### Final root cause
 
-Internal artifacts are available under `artifacts/rca/`.
+CrocSwapDex routes callpath 2 LP commands through WarmPath, where HARVEST_LP computes and credits concentrated LP fee rewards without enforcing the JIT/time-priority guard. The burn path calls assertJitSafe before reward-bearing liquidity removal, but harvestPosLiq computes rewards from feeMileage growth and pos.liquidity_ with no equivalent check. A freshly minted position can therefore harvest same-transaction fee-mileage growth created by attacker-controlled swaps, and the resulting surplus credit can be disbursed.
+
+### Affected contracts
+
+| Address | Name | Role | Implementation |
+|---|---|---|---|
+| `0xaaaaaaaaa24eeeb8d57d431224f73832bc34f688` | `CrocSwapDex` | `primary vulnerable contract` | `—` |
+
+### Recommended fixes
+
+- Add assertJitSafe(pos.timestamp_, poolIdx) to the concentrated LP harvest reward path before rewards are calculated or withdrawn, so HARVEST_LP and burn enforce the same jitThresh/time-priority invariant.
+- Add regression coverage for minting concentrated liquidity, generating same-block fee mileage, and attempting HARVEST_LP before jitThresh has elapsed.
+
 
 ## Artifacts
 
@@ -143,8 +155,8 @@ Internal artifacts are available under `artifacts/rca/`.
 | Bundle index | `README.md` | generated |
 | Machine run summary | `report/run_summary.json` | generated |
 | Final integrated report | `report/REPORT.md` | generated |
-| RCA | `report/RCA.md` | generated fallback |
-| RCA structured report | `report/report.json` | missing optional |
+| RCA | `report/RCA.md` | included |
+| RCA structured report | `report/report.json` | included |
 | PoC | `poc/PoC.t.sol` | included |
 | PoC base support | `poc/LumosPoCBase.sol` | included |
 | Asset deltas | `evidence/asset_deltas.json` | included |
